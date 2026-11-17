@@ -1,6 +1,9 @@
 import torch
 import torch.nn as tnn
-import torchvision.datasets as dsets
+try:
+    import torchvision.datasets as dsets
+except ImportError:
+    dsets = None  # 无 torchvision 环境（如 Orin 精简系统）不阻塞推理
 import torch.nn.functional as F
 
 def conv_layer(chann_in, chann_out, k_size, p_size):
@@ -579,6 +582,80 @@ class Decoder_2(tnn.Module):
         return out
 
 
+class Light_Encoder(tnn.Module):
+    """轻量编码器（A6-8 轻量化）：去掉 1024 中间层，64→128→256→512→C。
+    与 Encoder_2 同张量契约：输入 [B,3,512,1024] → 输出 [B,C,32,64]（4 次 stride-2 下采样）。"""
+
+    def __init__(self, C):
+        super(Light_Encoder, self).__init__()
+        self.layer1 = tnn.Sequential(
+            tnn.Conv2d(3, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1)),
+            tnn.InstanceNorm2d(64), tnn.LeakyReLU())
+        self.layer2 = tnn.Sequential(
+            tnn.Conv2d(64, 128, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
+            tnn.InstanceNorm2d(128), tnn.LeakyReLU())
+        self.layer3 = tnn.Sequential(
+            tnn.Conv2d(128, 256, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
+            tnn.InstanceNorm2d(256), tnn.LeakyReLU())
+        self.layer4 = tnn.Sequential(
+            tnn.Conv2d(256, 512, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
+            tnn.InstanceNorm2d(512), tnn.LeakyReLU())
+        self.layer5 = tnn.Sequential(
+            tnn.Conv2d(512, C, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1)),
+            tnn.InstanceNorm2d(C), tnn.Tanh())
+
+    def forward(self, x):
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.layer5(x)
+        return x
+
+
+class Light_Decoder(tnn.Module):
+    """轻量解码器（A6-8 轻量化）：瓶颈 1024→512、残差块 9→3。
+    与 Decoder_2 同张量契约/空间账：输入 [B,C,32,64] → 输出 [B,3,512,1024]。"""
+
+    def __init__(self, C):
+        super(Light_Decoder, self).__init__()
+        self.upsample_1 = tnn.Sequential(
+            tnn.Conv2d(C, 512, kernel_size=(3, 3), stride=(1, 1)),
+            tnn.InstanceNorm2d(512), tnn.LeakyReLU())
+        self.resblock_1 = BasicBlock(512, 512)
+        self.resblock_2 = BasicBlock(512, 512)
+        self.resblock_3 = BasicBlock(512, 512)
+        self.upsample_2 = tnn.Sequential(
+            tnn.ConvTranspose2d(512, 256, kernel_size=(3, 3), stride=(2, 2), output_padding=(1, 1)),
+            tnn.InstanceNorm2d(256), tnn.ReLU())
+        self.upsample_3 = tnn.Sequential(
+            tnn.ConvTranspose2d(256, 128, kernel_size=(3, 3), stride=(2, 2), output_padding=(1, 1)),
+            tnn.InstanceNorm2d(128), tnn.ReLU())
+        self.upsample_4 = tnn.Sequential(
+            tnn.ConvTranspose2d(128, 64, kernel_size=(3, 3), stride=(2, 2), output_padding=(1, 1)),
+            tnn.InstanceNorm2d(64), tnn.ReLU())
+        self.pad = tnn.ReflectionPad2d(1)
+        self.upsample_5 = tnn.Sequential(
+            tnn.ConvTranspose2d(64, 32, kernel_size=(3, 3), stride=(2, 2), output_padding=(1, 1)),
+            tnn.InstanceNorm2d(32), tnn.ReLU())
+        self.upsample_6 = tnn.Sequential(
+            tnn.Conv2d(32, 3, kernel_size=(3, 3), stride=(1, 1)),
+            tnn.Tanh())
+
+    def forward(self, x):
+        out = self.upsample_1(x)
+        out = self.resblock_1(out)
+        out = self.resblock_2(out)
+        out = self.resblock_3(out)
+        out = self.upsample_2(out)
+        out = self.upsample_3(out)
+        out = self.upsample_4(out)
+        out = self.pad(out)
+        out = self.upsample_5(out)
+        out = self.upsample_6(out)
+        return out
+
+
 class Muti_Discriminator(tnn.Module):
     def __init__(self, ):
         super(Muti_Discriminator, self).__init__()
@@ -598,8 +675,7 @@ class Muti_Discriminator(tnn.Module):
             tnn.LeakyReLU(),
             tnn.BatchNorm2d(512),
             tnn.ReLU(),
-            tnn.Conv2d(512, 1, kernel_size=(3, 3), stride=(1, 1)),
-            tnn.Sigmoid()
+            tnn.Conv2d(512, 1, kernel_size=(3, 3), stride=(1, 1))
         )
 
         self.D2 = tnn.Sequential(
@@ -618,8 +694,7 @@ class Muti_Discriminator(tnn.Module):
             tnn.LeakyReLU(),
             tnn.BatchNorm2d(512),
             tnn.ReLU(),
-            tnn.Conv2d(512, 1, kernel_size=(3, 3), stride=(1, 1)),
-            tnn.Sigmoid()
+            tnn.Conv2d(512, 1, kernel_size=(3, 3), stride=(1, 1))
         )
 
         self.D3 = tnn.Sequential(
@@ -639,8 +714,7 @@ class Muti_Discriminator(tnn.Module):
             tnn.LeakyReLU(),
             tnn.BatchNorm2d(512),
             tnn.ReLU(),
-            tnn.Conv2d(512, 1, kernel_size=(3, 3), stride=(1, 1)),
-            tnn.Sigmoid()
+            tnn.Conv2d(512, 1, kernel_size=(3, 3), stride=(1, 1))
         )
 
     def forward(self, x):

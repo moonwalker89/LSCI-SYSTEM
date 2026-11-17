@@ -1,0 +1,5 @@
+torch>=2.0
+numpy
+pillow
+
+# 板端（RK3576）另需 Rockchip 官方运行库 rknn_toolkit_lite2（aarch64 wheel，见 README）
